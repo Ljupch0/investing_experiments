@@ -1,0 +1,77 @@
+---
+title: "Tweet View"
+output: html_notebook
+---
+
+```{r}
+library(yfinance)
+library(lubridate)
+
+`%nin%` <- Negate(`%in%`)
+
+sum_NA <- function(x) {
+  # Treats NAs as zero when they are summed with nonNA values. Sum of only NAs will result in NA.
+  # Used to combine two rows of data.
+  if (all(is.na(x))) x[NA_integer_] else sum(x, na.rm = TRUE)
+} 
+
+coalesce_by_column <- function(df) {
+  return(dplyr::coalesce(!!! as.list(df)))
+}
+
+
+#install.packages("BatchGetSymbols")
+library(BatchGetSymbols)
+# remotes::install_github("Ljupch0/yfinance")
+library(yfinance)
+# install.packages("RVerbalExpressions")
+library(RVerbalExpressions)
+```
+
+
+```{r}
+sp500 <- BatchGetSymbols::GetSP500Stocks()
+
+# Remove B share classes
+sp500 <- sp500 %>% 
+  dplyr::filter(!grepl("*\\.B$", sp500$Tickers))
+```
+
+```{r}
+# sp500_data <- getFinancials(ticker = sp500$Tickers, report_type = "quarterly")
+# saveRDS(sp500_data, "../data/sp500_data.RDS")
+sp500_data <- readRDS("../data/sp500_data.RDS")
+```
+
+
+```{r}
+sp500_latest <- sp500_data %>% 
+  dplyr::mutate(date = as.Date(date),
+                date = round_date(date, unit = "month") - 1) %>%
+  group_by(ticker) %>% 
+  dplyr::filter(date == last(date) ) %>% 
+  group_by(ticker, date) %>%
+  summarise_all(coalesce_by_column) 
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
