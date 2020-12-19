@@ -5,15 +5,11 @@ output: html_notebook
 
 ```{r}
 library(yfinance)
+library(quantmod)
 library(lubridate)
+library(ggplot2)
 
 `%nin%` <- Negate(`%in%`)
-
-sum_NA <- function(x) {
-  # Treats NAs as zero when they are summed with nonNA values. Sum of only NAs will result in NA.
-  # Used to combine two rows of data.
-  if (all(is.na(x))) x[NA_integer_] else sum(x, na.rm = TRUE)
-} 
 
 coalesce_by_column <- function(df) {
   return(dplyr::coalesce(!!! as.list(df)))
@@ -35,6 +31,14 @@ sp500 <- BatchGetSymbols::GetSP500Stocks()
 # Remove B share classes
 sp500 <- sp500 %>% 
   dplyr::filter(!grepl("*\\.B$", sp500$Tickers))
+
+sp500_price <- get_price( sp500$Tickers)
+saveRDS(sp500_price, "../data/sp500.RDS")
+
+sp500_market_cap <- sp500_price %>% 
+  select(ticker, marketCap)
+
+
 ```
 
 ```{r}
@@ -49,24 +53,122 @@ sp500_latest <- sp500_data %>%
   dplyr::mutate(date = as.Date(date),
                 date = round_date(date, unit = "month") - 1) %>%
   group_by(ticker) %>% 
-  dplyr::filter(date == last(date) ) %>% 
+  dplyr::filter(date == first(date) ) %>% 
   group_by(ticker, date) %>%
   summarise_all(coalesce_by_column) 
 ```
 
 
+```{r}
+sp500_latest %>% 
+  full_join(sp500_market_cap) %>% 
+  `[`(1:50,) %>% 
+  mutate(
+    enterprise_value = marketCap + coalesce(longTermDebt, 0 ) - cash
+  ) %>% 
+  select(enterprise_value, everything()) %>% 
+  ggplot()+
+    geom_point(mapping = aes(x = ticker, y = marketCap), color = "blue")+
+  geom_point(mapping = aes(x = ticker, y = enterprise_value), color = "red")
+  
+
+
+```
+
+```{r}
+names(sp500_latest)
+```
 
 
 
 
+```{r}
+get_key_stats <- function(ticker) {
+  get_key_stats_proto <- function(ticker, report_type) {
+    baseURL <- "https://query2.finance.yahoo.com/v10/finance/quoteSummary/"
+    bsURL <- paste0(baseURL, ticker, "?modules=", "defaultKeyStatistics")
+    df <- json2tidy(bsURL) %>%
+      select(endDate.fmt, ends_with(".raw"), -endDate.raw)
+    names(df) <- sub(".raw","", names(df))
+    names(df) <- sub(".fmt","", names(df))
+    df$ticker <- ticker
+    df %>%
+      dplyr::rename(
+        date = endDate
+      ) %>%
+      dplyr::select(
+        ticker, date, everything()
+      )
+  }
+  m <- purrr::map(.x =ticker, .f = ~ get_key_stats_proto)
+  bind_rows(m)
+
+}
+```
 
 
+```{r}
+get_key_stats("AAPL")
+```
+```{r}
+re <- json2tidy(glue::glue("https://query2.finance.yahoo.com/v10/finance/quoteSummary/AAPL?modules=defaultKeyStatistics"))
+```
 
 
+```{r}
+json2tidy <- function (url) {
+  json <- jsonlite::fromJSON(url)
+  df <- jsonlite::flatten(json[[1]][[1]][[1]][[1,1]])
+}
+```
+
+```{r}
+ names(df) <- sub(".raw","", names(df))
+```
 
 
+```{r}
+get_key_stats <- function(ticker) {
+  get_key_stats_proto <- function(ticker) {
+    jsonlite::flatten(jsonlite::fromJSON(glue::glue("https://query2.finance.yahoo.com/v10/finance/quoteSummary/{ticker}?modules=defaultKeyStatistics"))[[1]][[1]][[1]]) %>% 
+      select(ends_with(".raw")) %>% 
+      `names<-`(sub(".raw","", names(.))) %>% 
+      mutate(
+        ticker = ticker,
+        date = Sys.Date()
+      ) %>% 
+      select(ticker, date, everything())
+  }
+  purrr::map_df(.x = ticker, ~ get_key_stats_proto(.x) )
+}
 
 
+```
+
+
+```{r}
+get_price <- function(ticker) {
+  get_key_stats_proto <- function(ticker) {
+    jsonlite::flatten(jsonlite::fromJSON(glue::glue("https://query2.finance.yahoo.com/v10/finance/quoteSummary/{ticker}?modules=price"))[[1]][[1]][[1]]) %>% 
+      select(ends_with(".raw")) %>% 
+      `names<-`(sub(".raw","", names(.))) %>% 
+      mutate(
+        ticker = ticker,
+        date = Sys.Date()
+      ) %>% 
+      select(ticker, date, everything())
+  }
+  purrr::map_df(.x = ticker, ~ get_key_stats_proto(.x) )
+}
+
+
+```
+
+```{r}
+
+get_price(c("AAPL", "TSLA"))
+
+```
 
 
 
