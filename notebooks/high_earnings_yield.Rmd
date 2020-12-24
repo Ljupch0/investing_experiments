@@ -1,0 +1,279 @@
+---
+title: "High Earnings Yield Portfolio"
+output: html_notebook
+---
+
+```{r}
+# install.packages("dplyr")
+# install.packages("ggplot2")
+# install.packages("lubridate")
+# install.packages("BatchGetSymbols")
+# install.packages("remotes")
+# remotes::install_github("Ljupch0/yfinance")
+```
+
+
+
+
+```{r}
+library(yfinance)
+library(quantmod)
+library(lubridate)
+library(ggplot2)
+library(BatchGetSymbols)
+library(tidyr)
+
+`%nin%` <- Negate(`%in%`)
+
+coalesce_by_column <- function(df) {
+  return(dplyr::coalesce(!!! as.list(df)))
+}
+
+get_price <- function(ticker) {
+  get_key_stats_proto <- function(ticker) {
+    jsonlite::flatten(jsonlite::fromJSON(glue::glue("https://query2.finance.yahoo.com/v10/finance/quoteSummary/{ticker}?modules=price"))[[1]][[1]][[1]]) %>% 
+      select(ends_with(".raw")) %>% 
+      `names<-`(sub(".raw","", names(.))) %>% 
+      mutate(
+        ticker = ticker,
+        date = Sys.Date()
+      ) %>% 
+      select(ticker, date, everything())
+  }
+  purrr::map_df(.x = ticker, ~ get_key_stats_proto(.x) )
+}
+
+
+
+```
+
+
+```{r}
+## Имиња на акциите во S&P500
+sp500 <- BatchGetSymbols::GetSP500Stocks()
+
+## Ги вадиме имиињата на акции со .B бидејќи не враќаат податоци од yfinance
+sp500 <- sp500 %>% 
+  dplyr::filter(!grepl("*\\.B$", sp500$Tickers))
+
+## Ги симнуваме цените
+# sp500_price <- get_price( sp500$Tickers)
+# saveRDS(sp500_price, "../data/sp500_price.RDS")
+sp500_price <- readRDS("../data/sp500_price.RDS")
+
+## Од цените ни треба Market Capitalizaiton
+sp500_market_cap <- sp500_price %>% 
+  select(ticker, marketCap)
+
+
+```
+
+```{r}
+## Ги симнуваме финансиските податоци за сите 500 акции. Треба време: 1500 API Повикувања
+
+# sp500_data <- getFinancials(ticker = sp500$Tickers, report_type = "quarterly")
+# saveRDS(sp500_data, "../data/sp500_data.RDS")
+
+#sp500_data_yearly <- yfinance::getFinancials(ticker = sp500$Tickers, report_type = "yearly")
+#sp500_data_yearly1 <- yfinance::getFinancials(ticker = sp500$Tickers[1:200], report_type = "yearly")
+#sp500_data_yearly2 <- yfinance::getFinancials(ticker = sp500$Tickers[201:400], report_type = "yearly")
+#sp500_data_yearly3 <- yfinance::getFinancials(ticker = sp500$Tickers[401:503], report_type = "yearly")
+#sp500_data_yearly <- bind_rows(sp500_data_yearly1, sp500_data_yearly2, sp500_data_yearly3)
+#saveRDS(sp500_data_yearly, "../data/sp500_data_yearly.RDS")
+
+sp500_data_yearly <- readRDS("../data/sp500_data_yearly.RDS")
+
+## Чистење - На пример за ABBV за дата 2020-03-31 има две ставки, каде втората има само податок за minorityInterest кој фали кај првата.
+## Ги комбинираме ставките така што секој финансиски извештај е само една ставка
+sp500_data <- readRDS("../data/sp500_data.RDS") %>% 
+  group_by(ticker, date) %>% 
+  summarize_all(coalesce_by_column)
+```
+
+
+```{r}
+# Филтер: date ја форматираме како дата, ги редиме по група по дата, и го филтрираме последниот извештај
+sp500_latest <- sp500_data %>% 
+  dplyr::mutate(date = as.Date(date)) %>%
+  group_by(ticker) %>% 
+  arrange(date) %>% 
+  dplyr::filter(date == last(date) )
+```
+
+
+# Cheap
+```{r}
+# Пресметки
+earnings_yield <- sp500_latest %>% 
+  full_join(sp500_market_cap) %>% 
+  transmute(
+    enterprise_value = marketCap + coalesce(longTermDebt, 0 ) - cash,
+    ebitda = totalRevenue - costOfRevenue - sellingGeneralAdministrative - replace_na(researchDevelopment, 0),
+    earnings_yield = ebitda / enterprise_value * 100
+  ) %>% 
+  arrange(desc(earnings_yield)) %>% 
+  ungroup() %>% 
+  mutate(
+    earnings_yield_rank = 1:nrow(.)
+  )
+```
+
+
+# Financial Quality: Piotroski F-Score
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+
+penultimate <- function (vector) {
+  nth(vector, -2)
+}
+
+
+piotroski <- sp500_data_yearly %>%
+  mutate(
+    date = as.Date(date)
+  ) %>% 
+  arrange(date) %>% 
+  group_by(ticker) %>% 
+  transmute(
+    date = date,
+    
+    # Profitability
+    # Return on Assets (1 point if it is positive in the current year, 0 otherwise);
+    roa = netIncome / totalAssets,
+    f1_roa_positive = if_else(last(roa) > 0, 1, 0),
+    
+    # Operating Cash Flow (1 point if it is positive in the current year, 0 otherwise);
+    f2_cf_posive = if_else(last(totalCashFromOperatingActivities) > 0, 1, 0 ),
+    
+    # Change in Return of Assets (ROA) (1 point if ROA is higher in the current year compared to the previous one, 0 otherwise);
+    f3_change_roa = if_else(last(roa) > penultimate(roa), 1, 0 ),
+    
+    # Accruals (1 point if Operating Cash Flow/Total Assets is higher than ROA in the current year, 0 otherwise);
+    operating_total_assets = totalCashFromOperatingActivities / totalAssets,
+    f4_accruals = ifelse( last(operating_total_assets) > last(roa), 1, 0 ),
+    
+    # Leverage, Liquidity and Source of Funds
+    # Change in Leverage (long-term) ratio (1 point if the ratio is lower this year compared to the previous one, 0 otherwise);
+    f5_leverage = if_else(replace_na(last(longTermDebt), 0 ) > replace_na( penultimate(longTermDebt), 0 ) , 1, 0),
+    
+    # Change in Current ratio (1 point if it is higher in the current year compared to the previous one, 0 otherwise);
+    current_ratio = totalCurrentAssets / totalCurrentLiabilities,
+    f6_current_change = if_else( last(current_ratio) > penultimate(current_ratio), 1, 0 ),
+    
+    # Change in the number of shares (1 point if no new shares were issued during the last year);
+    f7_change_shares = if_else(is.na(issuanceOfStock), 1, 0),
+    
+    # Operating Efficiency
+    # Change in Gross Margin (1 point if it is higher in the current year compared to the previous one, 0 otherwise);
+    gross_margin = grossProfit / totalRevenue,
+    f8_gross_margin = ifelse(last(gross_margin) > penultimate(gross_margin), 1, 0 ),
+    
+    # Change in Asset Turnover ratio (1 point if it is higher in the current year compared to the previous one, 0 otherwise);
+    totalAssets = totalAssets,
+    average_assets = ( totalAssets + lag(totalAssets) ) / 2,
+    asset_turnover = totalRevenue / average_assets,
+    f9_asset_turn = if_else(last(asset_turnover) > penultimate(asset_turnover), 1, 0)
+    
+  ) %>% 
+  select(ticker, date, starts_with("f")) %>% 
+  dplyr::filter(date == last(date)) %>%  
+  mutate(
+    f_score = f1_roa_positive + f2_cf_posive + f3_change_roa + f4_accruals + f5_leverage + f6_current_change + f7_change_shares + f8_gross_margin + f9_asset_turn
+  ) %>% 
+  arrange(f_score) %>% 
+  ungroup() %>% 
+  mutate(f_score_rank = rank(-f_score))
+  
+
+```
+
+
+```{r}
+rankings <- full_join(earnings_yield %>% select(ticker, earnings_yield_rank),
+                      piotroski %>% select(ticker, f_score_rank )
+                      ) %>% 
+  mutate(
+    average_rank = (earnings_yield_rank + f_score_rank) / 2,
+  ) %>% 
+  arrange(average_rank)
+```
+
+```{r}
+linear_weight <- function(length) {
+   len <- length
+    avg <- 1/len
+    min <- avg/2
+    inc <- 1.5 * avg
+    weights <- seq(from = min, by = inc, length.out = len)
+    rescale <- 1 / sum(weights)
+    return(rescaled_weights <- sort(weights*rescale, decreasing = TRUE) )
+}
+
+
+portfolio <- rankings[1:30,] %>% 
+  mutate(
+    equal_weight = 1/nrow(.),
+    linear_weight = linear_weight(nrow(.))
+  )
+```
+
+
+```{r}
+get_asset_summaries <- function(ticker) {
+  get_asset_summaries_proto <- function(ticker) {
+    jsonlite::flatten(jsonlite::fromJSON(glue::glue("https://query2.finance.yahoo.com/v10/finance/quoteSummary/{ticker}?modules=summaryProfile"))[[1]][[1]][[1]]) %>% 
+      mutate(
+        ticker = ticker
+      ) %>%
+      select(ticker, everything())
+  }
+  purrr::map_df(.x = ticker, ~ get_asset_summaries_proto(.x) )
+}
+```
+
+
+```{r}
+asset_summaries <- get_asset_summaries(portfolio$ticker) 
+  
+full_portfolio <- full_join(portfolio, asset_summaries)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
